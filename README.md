@@ -1,52 +1,66 @@
-# TextPort MVP
+# TextPort Android App
 
-Production-oriented MVP for transparent SMS sync from Android to user account backend.
+Android client for TextPort SMS synchronization.
 
-## Compliance posture
-- Explicit onboarding disclosure and opt-in consent required.
-- No stealth or hidden background capture without user enablement.
-- In-app privacy policy.
-- Pause/resume sync controls.
-- Export account data.
-- Delete account and synced data.
-- Play policy design target: SMS Backup/Restore declaration path (or default SMS app path).
+## What this app does
 
-## Android app
-- Module: `app/`
-- Runtime permissions: `RECEIVE_SMS`, `READ_SMS`
-- Core flow:
-  - User consents in UI.
-  - User grants SMS permissions.
-  - User authenticates to backend.
-  - `SmsReceiver` enqueues `WorkManager` upload.
-  - User can pause/resume/export/delete.
+- Captures incoming SMS (`RECEIVE_SMS`, `READ_SMS`)
+- Registers device using activation code
+- Syncs SMS to TextPort Laravel API in background via WorkManager
+- Lets user toggle sync on/off
+- Supports server connection testing and settings from app UI
 
-## Backend API
-- Module: `backend/`
-- Stack: Node.js, Express, SQLite, JWT
-- Security baseline: Helmet, CORS allowlist, rate limit, auth middleware
-- Endpoints:
-  - `POST /api/auth/register`
-  - `POST /api/auth/login`
-  - `POST /api/messages/sync`
-  - `GET /api/messages`
-  - `POST /api/account/pause`
-  - `POST /api/account/resume`
-  - `GET /api/account/export`
-  - `POST /api/account/delete`
+## Current UX flow
 
-## Web dashboard
-- Module: `dashboard/`
-- Plain HTML/JS management console for MVP validation and ops.
+1. Splash screen
+2. First-run SMS permission prompt
+3. First-run connection verification prompt
+4. Dashboard + hamburger menu navigation
+5. Device registration (activation code)
+6. Live sync toggle
 
-## Run locally
-1. `docker compose up`
-2. Open dashboard: `http://localhost:3000`
-3. Backend API: `http://localhost:8080/api/health`
+After first successful setup, registration is hidden from dashboard and profile/settings controls are used for account reset or connection changes.
 
-## Hardening before production launch
-1. Move SQLite to managed Postgres with encrypted storage.
-2. Add TLS, HSTS, managed secret store, key rotation.
-3. Add audit logging and per-device token revocation.
-4. Add stronger PII controls and retention policy options.
-5. Add CI tests, Android instrumentation tests, and threat model review.
+## Build / run
+
+```bash
+cd /path/to/TextPort-android
+./gradlew :app:installDebug
+```
+
+## Required permissions
+
+- `android.permission.RECEIVE_SMS`
+- `android.permission.READ_SMS`
+- `android.permission.INTERNET`
+- `android.permission.ACCESS_NETWORK_STATE`
+- `android.permission.RECEIVE_BOOT_COMPLETED`
+
+## API base URL
+
+Default is set in `app/build.gradle.kts` via `BuildConfig.API_BASE_URL`.
+
+You can also change/test the server URL in-app from **Settings**.
+
+## Device onboarding
+
+Primary:
+- Admin creates account/code from backend admin panel (`/admin/accounts`)
+- User enters code in app and registers
+
+Optional hybrid:
+- App can request code automatically if backend policy enables:
+  - `AUTH_ALLOW_PUBLIC_CODE_REQUEST=true`
+
+## Background behavior
+
+- SMS receiver + WorkManager continue in background for normal use.
+- After device reboot, boot receiver restores sync context.
+- If app is force-stopped by user, Android blocks background receivers until app is opened again.
+
+## Troubleshooting
+
+- If sync fails, first test connection from app Settings.
+- Confirm sync toggle is ON.
+- Confirm device is registered (activation successful).
+- Check backend admin logs and device feed for API-side errors.
