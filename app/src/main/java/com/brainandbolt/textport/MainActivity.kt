@@ -198,6 +198,11 @@ private fun AppRoot() {
                         smsThreads = withContext(Dispatchers.IO) { loadThreads(context) }
                             .applyReadOverrides(currentLastOpened)
                     } else {
+                        // Any DB change while in a conversation (sent or received) means
+                        // the user is actively engaged — extend the read window to now so
+                        // the unread badge never flickers back.
+                        val key = normalizePhone(thread.address)
+                        lastOpenedTimestamps = lastOpenedTimestamps + (key to System.currentTimeMillis())
                         smsMessages = withContext(Dispatchers.IO) {
                             loadMessages(context, thread.threadId, thread.address)
                         }
@@ -360,6 +365,10 @@ private fun AppRoot() {
                                 withContext(Dispatchers.IO) {
                                     sendSms(context, selectedThread!!.address, selectedThread!!.threadId, message)
                                 }
+                                // Extend the "read" window past the sent message's timestamp so
+                                // applyReadOverrides keeps the badge clear after sending.
+                                val key = normalizePhone(selectedThread!!.address)
+                                lastOpenedTimestamps = lastOpenedTimestamps + (key to System.currentTimeMillis())
                                 smsMessages = withContext(Dispatchers.IO) {
                                     loadMessages(context, selectedThread!!.threadId, selectedThread!!.address)
                                 }
