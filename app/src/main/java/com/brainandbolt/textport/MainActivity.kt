@@ -142,6 +142,9 @@ private fun AppRoot() {
 
     var hasSmsPermissions by remember { mutableStateOf(hasSmsPermissions(context)) }
     var isDefaultSmsApp by remember { mutableStateOf(checkIsDefaultSmsApp(context)) }
+    // Maps normalised address → latestTimestamp at the time the user opened it.
+    // Any thread whose latestTimestamp <= this value is considered read by the user.
+    var lastOpenedTimestamps by remember { mutableStateOf(mapOf<String, Long>()) }
 
     val smsPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
@@ -170,6 +173,7 @@ private fun AppRoot() {
         if (section == AppSection.Dashboard && hasSmsPermissions) {
             if (selectedThread == null) {
                 smsThreads = withContext(Dispatchers.IO) { loadThreads(context) }
+                    .applyReadOverrides(lastOpenedTimestamps)
             } else {
                 withContext(Dispatchers.IO) { markThreadAsRead(context, selectedThread!!.threadId) }
                 smsMessages = withContext(Dispatchers.IO) {
@@ -181,6 +185,7 @@ private fun AppRoot() {
 
     // Real-time updates: observe the SMS content provider and refresh immediately on any change
     val currentSelectedThread by rememberUpdatedState(selectedThread)
+    val currentLastOpened by rememberUpdatedState(lastOpenedTimestamps)
     DisposableEffect(section, hasSmsPermissions) {
         if (section != AppSection.Dashboard || !hasSmsPermissions) {
             return@DisposableEffect onDispose {}
@@ -191,6 +196,7 @@ private fun AppRoot() {
                     val thread = currentSelectedThread
                     if (thread == null) {
                         smsThreads = withContext(Dispatchers.IO) { loadThreads(context) }
+                            .applyReadOverrides(currentLastOpened)
                     } else {
                         smsMessages = withContext(Dispatchers.IO) {
                             loadMessages(context, thread.threadId, thread.address)
@@ -312,6 +318,7 @@ private fun AppRoot() {
                             selectedThread = null
                             scope.launch {
                                 smsThreads = withContext(Dispatchers.IO) { loadThreads(context) }
+                                    .applyReadOverrides(lastOpenedTimestamps)
                             }
                         }) {
                             Text("←", style = MaterialTheme.typography.titleLarge)
@@ -373,14 +380,18 @@ private fun AppRoot() {
                         hasPermissions = hasSmsPermissions,
                         threads = smsThreads,
                         onThreadClick = { thread ->
-                            // Instantly clear the unread badge in the displayed list so it
-                            // disappears the moment the user taps — no waiting for DB or
-                            // ContentObserver. markThreadAsRead still runs for persistence.
+                            val key = normalizePhone(thread.address)
+                            // Record the timestamp we opened at — any message at or before this
+                            // is considered read, even if markThreadAsRead fails (non-default app).
+                            lastOpenedTimestamps = lastOpenedTimestamps + (key to thread.latestTimestamp)
+                            // Instantly clear badge from the displayed list (no waiting for DB).
                             smsThreads = smsThreads.map { t ->
-                                if (normalizePhone(t.address) == normalizePhone(thread.address))
+                                if (normalizePhone(t.address) == key)
                                     t.copy(hasUnread = false, unreadCount = 0)
                                 else t
                             }
+                            // Dismiss any system notification for this sender.
+                            SmsNotificationHelper.cancelNotification(context, thread.address)
                             selectedThread = thread
                         },
                         onThreadDelete = { thread ->
@@ -1230,3 +1241,15 @@ private fun hasSmsPermissions(context: Context): Boolean {
 
 private fun checkIsDefaultSmsApp(context: Context): Boolean =
     Telephony.Sms.getDefaultSmsPackage(context) == context.packageName
+
+/**
+ * Clears the unread badge for any thread whose latestTimestamp is at or before
+ * the timestamp stored when the user last opened that conversation.
+ * This ensures the badge stays gone even when loadThreads() is called again
+ * (e.g. back-button reload, ContentObserver) before markThreadAsRead() persists.
+ */
+private fun List<SmsThread>.applyReadOverrides(lastOpened: Map<String, Long>): List<SmsThread> =
+    map { t ->
+        val lastRead = lastOpened[normalizePhone(t.address)] ?: -1L
+        if (lastRead >= t.latestTimestamp) t.copy(hasUnread = false, unreadCount = 0) else t
+    }

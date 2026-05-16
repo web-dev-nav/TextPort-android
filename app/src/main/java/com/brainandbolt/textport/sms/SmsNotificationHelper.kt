@@ -58,4 +58,8 @@ object SmsNotificationHelper {
         NotificationManagerCompat.from(context)
             .notify(sender.hashCode(), notification)
     }
+
+    fun cancelNotification(context: Context, sender: String) {
+        NotificationManagerCompat.from(context).cancel(sender.hashCode())
+    }
 }
