@@ -1034,7 +1034,7 @@ private fun loadThreads(context: Context): List<SmsThread> {
     val cursor = context.contentResolver.query(
         Telephony.Sms.CONTENT_URI,
         arrayOf(Telephony.Sms.THREAD_ID, Telephony.Sms.ADDRESS, Telephony.Sms.BODY,
-                Telephony.Sms.DATE, Telephony.Sms.READ),
+                Telephony.Sms.DATE, Telephony.Sms.READ, Telephony.Sms.TYPE),
         null, null,
         "${Telephony.Sms.DATE} DESC"
     ) ?: return emptyList()
@@ -1045,6 +1045,7 @@ private fun loadThreads(context: Context): List<SmsThread> {
         val bodyIdx     = it.getColumnIndex(Telephony.Sms.BODY)
         val dateIdx     = it.getColumnIndex(Telephony.Sms.DATE)
         val readIdx     = it.getColumnIndex(Telephony.Sms.READ)
+        val typeIdx     = it.getColumnIndex(Telephony.Sms.TYPE)
 
         while (it.moveToNext()) {
             val rawAddress  = it.getString(addrIdx) ?: continue
@@ -1053,7 +1054,9 @@ private fun loadThreads(context: Context): List<SmsThread> {
 
             threadIdMap.getOrPut(normAddress) { mutableSetOf() }.add(threadId)
 
-            if (it.getInt(readIdx) == 0) {
+            // Only inbox messages (type=1) that haven't been read count as unread
+            if (it.getInt(readIdx) == 0 &&
+                it.getInt(typeIdx) == Telephony.Sms.MESSAGE_TYPE_INBOX) {
                 unreadMap[normAddress] = (unreadMap[normAddress] ?: 0) + 1
             }
             // First row per address = latest message (DATE DESC)
