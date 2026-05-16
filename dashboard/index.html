@@ -1,0 +1,53 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>TextPort Dashboard</title>
+  <style>
+    body{font-family:ui-sans-serif,system-ui;margin:20px;max-width:900px}
+    input,button{padding:8px;margin:4px}
+    .row{display:flex;gap:8px;flex-wrap:wrap}
+    pre{white-space:pre-wrap;background:#f5f5f5;padding:8px;border-radius:6px}
+  </style>
+</head>
+<body>
+  <h1>TextPort Dashboard</h1>
+  <p>Transparent SMS sync management for your own account.</p>
+  <div class="row">
+    <input id="api" value="http://localhost:8080/api" size="35"/>
+    <input id="email" placeholder="email"/>
+    <input id="password" type="password" placeholder="password"/>
+    <button onclick="register()">Register</button>
+    <button onclick="login()">Login</button>
+  </div>
+  <div class="row">
+    <input id="q" placeholder="search body"/>
+    <input id="sender" placeholder="sender filter"/>
+    <button onclick="loadMessages()">Load Messages</button>
+    <button onclick="pauseSync()">Pause</button>
+    <button onclick="resumeSync()">Resume</button>
+    <button onclick="exportData()">Export</button>
+    <button onclick="deleteAll()">Delete Account/Data</button>
+  </div>
+  <p id="status"></p>
+  <pre id="out"></pre>
+<script>
+let token = localStorage.getItem('token') || '';
+const api = () => document.getElementById('api').value;
+const status = (s) => document.getElementById('status').innerText = s;
+const out = (d) => document.getElementById('out').innerText = typeof d === 'string' ? d : JSON.stringify(d,null,2);
+async function call(path, method='GET', body){
+  const res = await fetch(`${api()}${path}`,{method,headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{})},body:body?JSON.stringify(body):undefined});
+  const data = await res.json(); if(!res.ok) throw new Error(data.error||'Request failed'); return data;
+}
+async function register(){ try{const d=await call('/auth/register','POST',{email:email.value,password:password.value}); token=d.token; localStorage.setItem('token',token); status('Registered'); }catch(e){status(e.message)} }
+async function login(){ try{const d=await call('/auth/login','POST',{email:email.value,password:password.value}); token=d.token; localStorage.setItem('token',token); status('Logged in'); }catch(e){status(e.message)} }
+async function loadMessages(){ try{const d=await call(`/messages?q=${encodeURIComponent(q.value)}&sender=${encodeURIComponent(sender.value)}`); out(d.items); status('Loaded'); }catch(e){status(e.message)} }
+async function pauseSync(){ try{await call('/account/pause','POST'); status('Paused'); }catch(e){status(e.message)} }
+async function resumeSync(){ try{await call('/account/resume','POST'); status('Resumed'); }catch(e){status(e.message)} }
+async function exportData(){ try{const d=await call('/account/export'); out(d.download_url); status('Export generated'); }catch(e){status(e.message)} }
+async function deleteAll(){ if(!confirm('Delete account and all synced messages?'))return; try{await call('/account/delete','POST'); token=''; localStorage.removeItem('token'); status('Deleted'); out(''); }catch(e){status(e.message)} }
+</script>
+</body>
+</html>
