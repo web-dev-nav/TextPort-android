@@ -76,3 +76,19 @@ data class BasicResponse(val ok: Boolean, val message: String? = null)
 
 @Serializable
 data class ExportResponse(@SerialName("download_url") val downloadUrl: String)
+
+data class SmsThread(
+    val threadId: Long,
+    val address: String,
+    val latestBody: String,
+    val latestTimestamp: Long,
+    val hasUnread: Boolean = false,
+    val unreadCount: Int = 0
+)
+
+data class SmsMessage(
+    val address: String,
+    val body: String,
+    val timestamp: Long,
+    val type: Int  // Telephony.Sms.MESSAGE_TYPE_INBOX=1, MESSAGE_TYPE_SENT=2
+)
