@@ -7,6 +7,8 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.ContentUris
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -74,10 +76,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.brainandbolt.textport.data.AppContainer
 import com.brainandbolt.textport.data.SecurePreferences
 import com.brainandbolt.textport.data.SmsMessage
@@ -135,6 +141,7 @@ private fun AppRoot() {
     var setupCompleted by remember { mutableStateOf(prefs.setupCompleted()) }
     var section by remember { mutableStateOf(AppSection.Dashboard) }
     var showConnectionPrompt by remember { mutableStateOf(false) }
+    var showConversationDeleteConfirm by remember { mutableStateOf(false) }
     var selectedThread by remember { mutableStateOf<SmsThread?>(null) }
     var smsThreads by remember { mutableStateOf<List<SmsThread>>(emptyList()) }
     var smsMessages by remember { mutableStateOf<List<SmsMessage>>(emptyList()) }
@@ -142,6 +149,7 @@ private fun AppRoot() {
 
     var hasSmsPermissions by remember { mutableStateOf(hasSmsPermissions(context)) }
     var isDefaultSmsApp by remember { mutableStateOf(checkIsDefaultSmsApp(context)) }
+    var smsPermissionDenied by remember { mutableStateOf(isSmsPermissionDenied(context)) }
     // Maps normalised address → latestTimestamp at the time the user opened it.
     // Any thread whose latestTimestamp <= this value is considered read by the user.
     var lastOpenedTimestamps by remember { mutableStateOf(mapOf<String, Long>()) }
@@ -150,6 +158,7 @@ private fun AppRoot() {
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
         hasSmsPermissions = hasSmsPermissions(context)
+        smsPermissionDenied = isSmsPermissionDenied(context)
         val ok = permissions[Manifest.permission.RECEIVE_SMS] == true &&
                 permissions[Manifest.permission.READ_SMS] == true &&
                 permissions[Manifest.permission.SEND_SMS] == true
@@ -166,6 +175,18 @@ private fun AppRoot() {
             isDefaultSmsApp = checkIsDefaultSmsApp(context)
             status = if (isDefaultSmsApp) "TextPort set as default SMS app." else "Default SMS app not changed."
         }
+    }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                hasSmsPermissions = hasSmsPermissions(context)
+                smsPermissionDenied = isSmsPermissionDenied(context)
+                isDefaultSmsApp = checkIsDefaultSmsApp(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     // Load threads when on Dashboard; load messages when a thread is selected
@@ -278,6 +299,62 @@ private fun AppRoot() {
         )
     }
 
+    if (showConversationDeleteConfirm && selectedThread != null) {
+        AlertDialog(
+            onDismissRequest = { showConversationDeleteConfirm = false },
+            title = { Text("Delete Conversation") },
+            text = {
+                Text(
+                    if (isDefaultSmsApp)
+                        "Delete conversation with ${selectedThread!!.address}? This cannot be undone."
+                    else
+                        "TextPort must be the default SMS app to delete conversations."
+                )
+            },
+            confirmButton = {
+                if (isDefaultSmsApp) {
+                    Button(onClick = {
+                        val thread = selectedThread!!
+                        showConversationDeleteConfirm = false
+                        scope.launch {
+                            val deleted = withContext(Dispatchers.IO) {
+                                deleteThread(context, thread.threadId, thread.address)
+                            }
+                            val deletedKey = normalizePhone(thread.address)
+                            selectedThread = null
+                            smsMessages = emptyList()
+                            lastOpenedTimestamps = lastOpenedTimestamps - deletedKey
+                            smsThreads = withContext(Dispatchers.IO) { loadThreads(context) }
+                            status = when {
+                                deleted > 0 -> "Conversation deleted."
+                                !checkIsDefaultSmsApp(context) ->
+                                    "Delete failed. Set TextPort as default SMS app, then try again."
+                                else -> "Delete failed. Android blocked this action on this conversation."
+                            }
+                        }
+                    }) { Text("Delete") }
+                } else {
+                    Button(onClick = {
+                        val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                            context.getSystemService(RoleManager::class.java)
+                                .createRequestRoleIntent(RoleManager.ROLE_SMS)
+                        } else {
+                            @Suppress("DEPRECATION")
+                            Intent(Telephony.Sms.Intents.ACTION_CHANGE_DEFAULT).apply {
+                                putExtra(Telephony.Sms.Intents.EXTRA_PACKAGE_NAME, context.packageName)
+                            }
+                        }
+                        defaultSmsLauncher.launch(intent)
+                        showConversationDeleteConfirm = false
+                    }) { Text("Set as Default SMS App") }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showConversationDeleteConfirm = false }) { Text("Cancel") }
+            }
+        )
+    }
+
     ModalNavigationDrawer(
         drawerState = drawerState,
         drawerContent = {
@@ -335,6 +412,14 @@ private fun AppRoot() {
                     }
                 },
                 actions = {
+                    if (selectedThread != null) {
+                        TextButton(
+                            onClick = { showConversationDeleteConfirm = true },
+                            enabled = isDefaultSmsApp
+                        ) {
+                            Text("Delete")
+                        }
+                    }
                     Text(
                         "●",
                         color = if (syncEnabled) Color(0xFF34D399) else Color(0xFFFCA5A5),
@@ -360,6 +445,19 @@ private fun AppRoot() {
                     section == AppSection.Dashboard && selectedThread != null -> ConversationScreen(
                         address = selectedThread!!.address,
                         messages = smsMessages,
+                        isDefaultSmsApp = isDefaultSmsApp,
+                        onSetDefaultSmsApp = {
+                            val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                context.getSystemService(RoleManager::class.java)
+                                    .createRequestRoleIntent(RoleManager.ROLE_SMS)
+                            } else {
+                                @Suppress("DEPRECATION")
+                                Intent(Telephony.Sms.Intents.ACTION_CHANGE_DEFAULT).apply {
+                                    putExtra(Telephony.Sms.Intents.EXTRA_PACKAGE_NAME, context.packageName)
+                                }
+                            }
+                            defaultSmsLauncher.launch(intent)
+                        },
                         onSend = { message ->
                             scope.launch {
                                 withContext(Dispatchers.IO) {
@@ -405,10 +503,22 @@ private fun AppRoot() {
                         },
                         onThreadDelete = { thread ->
                             scope.launch {
-                                withContext(Dispatchers.IO) {
+                                val deleted = withContext(Dispatchers.IO) {
                                     deleteThread(context, thread.threadId, thread.address)
                                 }
+                                val deletedKey = normalizePhone(thread.address)
+                                if (normalizePhone(selectedThread?.address.orEmpty()) == deletedKey) {
+                                    selectedThread = null
+                                    smsMessages = emptyList()
+                                }
+                                lastOpenedTimestamps = lastOpenedTimestamps - deletedKey
                                 smsThreads = withContext(Dispatchers.IO) { loadThreads(context) }
+                                status = when {
+                                    deleted > 0 -> "Conversation deleted."
+                                    !checkIsDefaultSmsApp(context) ->
+                                        "Delete failed. Set TextPort as default SMS app, then try again."
+                                    else -> "Delete failed. Android blocked this action on this conversation."
+                                }
                             }
                         },
                         onRequestCode = {
@@ -497,6 +607,9 @@ private fun AppRoot() {
                             )
                         },
                         hasPermissions = hasSmsPermissions,
+                        showAndroid15RestrictedSettingsHelp = !hasSmsPermissions &&
+                                smsPermissionDenied &&
+                                Build.VERSION.SDK_INT >= 35,
                         isDefaultSmsApp = isDefaultSmsApp,
                         onSetDefaultSmsApp = {
                             val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -512,6 +625,12 @@ private fun AppRoot() {
                         },
                         onOpenDefaultAppsSettings = {
                             context.startActivity(Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS))
+                        },
+                        onOpenAppInfoSettings = {
+                            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                data = Uri.fromParts("package", context.packageName, null)
+                            }
+                            context.startActivity(intent)
                         }
                     )
                     else -> ProfileScreen(
@@ -787,6 +906,8 @@ private fun ThreadItem(thread: SmsThread, onClick: () -> Unit, onLongClick: () -
 private fun ConversationScreen(
     address: String,
     messages: List<SmsMessage>,
+    isDefaultSmsApp: Boolean,
+    onSetDefaultSmsApp: () -> Unit,
     onSend: (String) -> Unit,
     onMarkRead: () -> Unit
 ) {
@@ -805,6 +926,26 @@ private fun ConversationScreen(
             .fillMaxSize()
             .background(Color(0xFFF0F4F8))
     ) {
+        if (!isDefaultSmsApp) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFFFFF4E5))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "Set TextPort as default SMS app to delete conversations.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF7A4A00),
+                    modifier = Modifier.weight(1f)
+                )
+                TextButton(onClick = onSetDefaultSmsApp) {
+                    Text("Set Default")
+                }
+            }
+        }
         LazyColumn(
             modifier = Modifier.weight(1f),
             state = listState,
@@ -952,9 +1093,11 @@ private fun SettingsScreen(
     loggedIn: Boolean,
     onGrantPermissions: () -> Unit,
     hasPermissions: Boolean,
+    showAndroid15RestrictedSettingsHelp: Boolean,
     isDefaultSmsApp: Boolean,
     onSetDefaultSmsApp: () -> Unit,
-    onOpenDefaultAppsSettings: () -> Unit
+    onOpenDefaultAppsSettings: () -> Unit,
+    onOpenAppInfoSettings: () -> Unit
 ) {
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
@@ -990,6 +1133,12 @@ private fun SettingsScreen(
             Text(if (hasPermissions) "SMS permissions granted." else "SMS permissions required.")
             Button(onClick = onGrantPermissions) {
                 Text(if (hasPermissions) "Grant Again" else "Grant Permissions")
+            }
+            if (showAndroid15RestrictedSettingsHelp) {
+                Text("On Android 15, first enable \"Allow restricted settings\" in App Info, then grant SMS permission.")
+                TextButton(onClick = onOpenAppInfoSettings) {
+                    Text("Open App Info Settings")
+                }
             }
         }
 
@@ -1184,14 +1333,30 @@ private fun markThreadAsRead(context: Context, threadId: Long, address: String =
     )
 }
 
-private fun deleteThread(context: Context, threadId: Long, address: String = "") {
+private fun deleteThread(context: Context, threadId: Long, address: String = ""): Int {
     val ids = resolveThreadIds(threadId, address)
     val placeholders = ids.joinToString(",") { "?" }
-    context.contentResolver.delete(
-        Telephony.Sms.CONTENT_URI,
-        "${Telephony.Sms.THREAD_ID} IN ($placeholders)",
-        ids.map { it.toString() }.toTypedArray()
-    )
+    return try {
+        var totalDeleted = 0
+        // Preferred path: delete conversations via Threads URI.
+        ids.forEach { id ->
+            val threadUri = ContentUris.withAppendedId(Telephony.Threads.CONTENT_URI, id)
+            totalDeleted += context.contentResolver.delete(threadUri, null, null)
+        }
+        // Fallback path for OEM/provider variants where thread URI delete is ignored.
+        if (totalDeleted == 0) {
+            totalDeleted = context.contentResolver.delete(
+                Telephony.Sms.CONTENT_URI,
+                "${Telephony.Sms.THREAD_ID} IN ($placeholders)",
+                ids.map { it.toString() }.toTypedArray()
+            )
+        }
+        totalDeleted
+    } catch (_: SecurityException) {
+        0
+    } catch (_: IllegalArgumentException) {
+        0
+    }
 }
 
 /** Returns all known thread ids for an address, falling back to the single provided id. */
@@ -1246,6 +1411,19 @@ private fun hasSmsPermissions(context: Context): Boolean {
     return receive == PackageManager.PERMISSION_GRANTED &&
             read == PackageManager.PERMISSION_GRANTED &&
             send == PackageManager.PERMISSION_GRANTED
+}
+
+private fun isSmsPermissionDenied(context: Context): Boolean {
+    if (context !is Activity) return false
+    val smsPermissions = arrayOf(
+        Manifest.permission.RECEIVE_SMS,
+        Manifest.permission.READ_SMS,
+        Manifest.permission.SEND_SMS
+    )
+    return smsPermissions.any { permission ->
+        ContextCompat.checkSelfPermission(context, permission) != PackageManager.PERMISSION_GRANTED &&
+                ActivityCompat.shouldShowRequestPermissionRationale(context, permission)
+    }
 }
 
 private fun checkIsDefaultSmsApp(context: Context): Boolean =
