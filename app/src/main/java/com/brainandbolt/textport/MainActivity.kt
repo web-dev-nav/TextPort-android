@@ -372,7 +372,17 @@ private fun AppRoot() {
                         onActivationCodeChange = { activationCode = it },
                         hasPermissions = hasSmsPermissions,
                         threads = smsThreads,
-                        onThreadClick = { thread -> selectedThread = thread },
+                        onThreadClick = { thread ->
+                            // Instantly clear the unread badge in the displayed list so it
+                            // disappears the moment the user taps — no waiting for DB or
+                            // ContentObserver. markThreadAsRead still runs for persistence.
+                            smsThreads = smsThreads.map { t ->
+                                if (normalizePhone(t.address) == normalizePhone(thread.address))
+                                    t.copy(hasUnread = false, unreadCount = 0)
+                                else t
+                            }
+                            selectedThread = thread
+                        },
                         onThreadDelete = { thread ->
                             scope.launch {
                                 withContext(Dispatchers.IO) {
